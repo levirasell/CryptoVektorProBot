@@ -26,7 +26,9 @@ from telegram.ext import (
 # CONFIG
 # ------------------------------------------------------------------
 # ВСТАВЬ СВОЙ ТОКЕН НИЖЕ или установи переменную окружения BOT_TOKEN
-BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_TOKEN_HERE")
+BOT_TOKEN = os.getenv("8122827824:AAEXHjFpYGKyHarzGN4nkxr34j99X9JWmLk")
+if not BOT_TOKEN:
+    raise ValueError("Не задан BOT_TOKEN в переменных окружения!")
 
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 FEAR_GREED_API = "https://api.alternative.me/fng/"
