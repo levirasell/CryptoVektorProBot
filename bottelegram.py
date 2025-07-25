@@ -26,7 +26,7 @@ from telegram.ext import (
 # CONFIG
 # ------------------------------------------------------------------
 # ВСТАВЬ СВОЙ ТОКЕН НИЖЕ или установи переменную окружения BOT_TOKEN
-BOT_TOKEN = os.getenv("8122827824:AAEXHjFpYGKyHarzGN4nkxr34j99X9JWmLk")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не задан BOT_TOKEN в переменных окружения!")
 
@@ -591,7 +591,6 @@ async def clear_all_alerts_for_chat(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE
 # MAIN SETUP
 # ------------------------------------------------------------------
 def main():
-    BOT_TOKEN = "8122827824:AAEXHjFpYGKyHarzGN4nkxr34j99X9JWmLk"
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
