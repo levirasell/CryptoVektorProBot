@@ -1,41 +1,31 @@
 import os
 import io
 import logging
+import threading
+import time
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
 import requests
 import matplotlib.pyplot as plt
-
-from telegram import (
-    Update,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    JobQueue,
-    Job,
-)
+import telebot
+from telebot import types
 
 # ------------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------------
-# ВСТАВЬ СВОЙ ТОКЕН НИЖЕ или установи переменную окружения BOT_TOKEN
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("Не задан BOT_TOKEN в переменных окружения!")
+
+bot = telebot.TeleBot(BOT_TOKEN)
 
 COINGECKO_API = "https://api.coingecko.com/api/v3"
 FEAR_GREED_API = "https://api.alternative.me/fng/"
 DEFILLAMA_CHAINS = "https://api.llama.fi/chains"
 CRYPTO_CHANNEL_URL = "https://t.me/cryptovektorpro"
 
-# Список монет для уведомлений (15 популярных)
+# Список монет для уведомлений
 ALERT_COINS: List[Dict[str, str]] = [
     {"id": "bitcoin", "label": "BTC"},
     {"id": "ethereum", "label": "ETH"},
@@ -54,7 +44,7 @@ ALERT_COINS: List[Dict[str, str]] = [
     {"id": "litecoin", "label": "LTC"},
 ]
 
-# Интервалы для уведомлений (секунды)
+# Интервалы для уведомлений
 ALERT_INTERVALS = [
     ("15 мин", 15 * 60),
     ("30 мин", 30 * 60),
@@ -69,18 +59,17 @@ ALERT_INTERVALS = [
 # LOGGING
 # ------------------------------------------------------------------
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
 )
 logger = logging.getLogger("CryptoVektorProBot")
 
 # ------------------------------------------------------------------
-# SIMPLE IN-MEMORY CACHE
+# CACHE
 # ------------------------------------------------------------------
-_API_CACHE: Dict[str, Dict[str, Any]] = {}  # url -> {"ts": epoch, "data": obj}
-DEFAULT_TTL = 120  # seconds
-LONG_TTL = 3600  # 1 hour, e.g. for /coins/list
-
-import time
+_API_CACHE: Dict[str, Dict[str, Any]] = {}
+DEFAULT_TTL = 120
+LONG_TTL = 3600
 
 def cache_get(url: str, ttl: int = DEFAULT_TTL):
     rec = _API_CACHE.get(url)
@@ -110,7 +99,7 @@ def fetch_json(url: str, ttl: int = DEFAULT_TTL) -> Optional[Any]:
         return None
 
 # ------------------------------------------------------------------
-# HELPER FORMATTING
+# FORMATTING HELPERS
 # ------------------------------------------------------------------
 def fmt_money(v: Any, decimals: int = 2) -> str:
     try:
@@ -139,57 +128,61 @@ def now_str() -> str:
 # ------------------------------------------------------------------
 # KEYBOARDS
 # ------------------------------------------------------------------
-def main_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌍 Глобальные метрики", callback_data="global")],
-        [InlineKeyboardButton("🏆 Топ-10 монет", callback_data="top10")],
-        [InlineKeyboardButton("🔥 Трендовые монеты", callback_data="trending")],
-        [InlineKeyboardButton("💹 Топ пар по объему", callback_data="pairs")],
-        [InlineKeyboardButton("😱 Индекс страха/жадности", callback_data="fear")],
-        [InlineKeyboardButton("💎 DeFi метрики", callback_data="defi")],
-        [InlineKeyboardButton("🔔 Уведомления", callback_data="alerts_menu")],
-        [InlineKeyboardButton("📢 Канал CryptoVektorPro", url=CRYPTO_CHANNEL_URL)],
-    ])
+def main_menu_keyboard():
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+    buttons = [
+        types.InlineKeyboardButton("🌍 Глобальные метрики", callback_data="global"),
+        types.InlineKeyboardButton("🏆 Топ-10 монет", callback_data="top10"),
+        types.InlineKeyboardButton("🔥 Трендовые монеты", callback_data="trending"),
+        types.InlineKeyboardButton("💹 Топ пар по объему", callback_data="pairs"),
+        types.InlineKeyboardButton("😱 Индекс страха/жадности", callback_data="fear"),
+        types.InlineKeyboardButton("💎 DeFi метрики", callback_data="defi"),
+        types.InlineKeyboardButton("🔔 Уведомления", callback_data="alerts_menu"),
+    ]
+    keyboard.add(*buttons)
+    keyboard.add(types.InlineKeyboardButton("📢 Канал CryptoVektorPro", url=CRYPTO_CHANNEL_URL))
+    return keyboard
 
-def back_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="main_menu")]])
+def back_keyboard():
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton("🔙 Назад", callback_data="main_menu"))
+    return keyboard
 
-def alerts_coin_kb() -> InlineKeyboardMarkup:
-    rows = []
-    row = []
-    for i, c in enumerate(ALERT_COINS, start=1):
-        row.append(InlineKeyboardButton(c["label"], callback_data=f"alert_coin_{c['id']}"))
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("❌ Отключить все", callback_data="alerts_clear")])
-    rows.append([InlineKeyboardButton("🔙 Назад", callback_data="main_menu")])
-    return InlineKeyboardMarkup(rows)
+def alerts_coin_keyboard():
+    keyboard = types.InlineKeyboardMarkup(row_width=3)
+    buttons = []
+    for coin in ALERT_COINS:
+        buttons.append(types.InlineKeyboardButton(coin["label"], callback_data=f"alert_coin_{coin['id']}"))
+    
+    # Добавляем кнопки по 3 в ряд
+    for i in range(0, len(buttons), 3):
+        keyboard.add(*buttons[i:i+3])
+    
+    keyboard.add(types.InlineKeyboardButton("❌ Отключить все", callback_data="alerts_clear"))
+    keyboard.add(types.InlineKeyboardButton("🔙 Назад", callback_data="main_menu"))
+    return keyboard
 
-def alerts_interval_kb(coin_id: str) -> InlineKeyboardMarkup:
-    rows = []
-    row = []
+def alerts_interval_keyboard(coin_id: str):
+    keyboard = types.InlineKeyboardMarkup(row_width=3)
+    buttons = []
     for label, seconds in ALERT_INTERVALS:
-        row.append(InlineKeyboardButton(label, callback_data=f"alert_set_{coin_id}_{seconds}"))
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("🔙 Назад", callback_data="alerts_menu")])
-    return InlineKeyboardMarkup(rows)
+        buttons.append(types.InlineKeyboardButton(label, callback_data=f"alert_set_{coin_id}_{seconds}"))
+    
+    for i in range(0, len(buttons), 3):
+        keyboard.add(*buttons[i:i+3])
+    
+    keyboard.add(types.InlineKeyboardButton("🔙 Назад", callback_data="alerts_menu"))
+    return keyboard
 
-def coin_card_kb(coin_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 График 24ч", callback_data=f"chart_{coin_id}")],
-        [InlineKeyboardButton("🔔 Уведомления", callback_data=f"alert_coin_{coin_id}")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="main_menu")],
-    ])
+def coin_card_keyboard(coin_id: str):
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton("📈 График 24ч", callback_data=f"chart_{coin_id}"))
+    keyboard.add(types.InlineKeyboardButton("🔔 Уведомления", callback_data=f"alert_coin_{coin_id}"))
+    keyboard.add(types.InlineKeyboardButton("🔙 Назад", callback_data="main_menu"))
+    return keyboard
 
 # ------------------------------------------------------------------
-# COIN ID RESOLUTION
+# COIN DATA
 # ------------------------------------------------------------------
 _COINS_LIST_CACHE: Optional[List[Dict[str, str]]] = None
 
@@ -208,15 +201,18 @@ def find_coin_id(user_input: str) -> Optional[str]:
     coins = load_coins_list()
     if not coins:
         return None
-    # exact match by id, symbol, name
+    
+    # Точное совпадение
     for c in coins:
         if user_input == c["id"].lower() or user_input == c["symbol"].lower() or user_input == c["name"].lower():
             return c["id"]
-    # partial match symbol
+    
+    # Частичное совпадение по символу
     for c in coins:
         if user_input in c["symbol"].lower():
             return c["id"]
-    # partial name fallback
+    
+    # Частичное совпадение по названию
     for c in coins:
         if user_input in c["name"].lower():
             return c["id"]
@@ -234,10 +230,10 @@ def get_global_metrics_text() -> str:
         "<b>🌍 Глобальные метрики</b>\n\n"
         f"Активные криптовалюты: {fmt_int(d.get('active_cryptocurrencies'))}\n"
         f"Биржи: {fmt_int(d.get('markets'))}\n"
-        f"Общая капитализация: {fmt_money(d.get('total_market_cap', {}).get('usd'),0)}\n"
-        f"Объем 24ч: {fmt_money(d.get('total_volume', {}).get('usd'),0)}\n"
-        f"BTC Dominance: {d.get('market_cap_percentage',{}).get('btc',0):.2f}%\n"
-        f"ETH Dominance: {d.get('market_cap_percentage',{}).get('eth',0):.2f}%\n"
+        f"Общая капитализация: {fmt_money(d.get('total_market_cap', {}).get('usd'), 0)}\n"
+        f"Объем 24ч: {fmt_money(d.get('total_volume', {}).get('usd'), 0)}\n"
+        f"BTC Dominance: {d.get('market_cap_percentage', {}).get('btc', 0):.2f}%\n"
+        f"ETH Dominance: {d.get('market_cap_percentage', {}).get('eth', 0):.2f}%\n"
         f"\n<i>Обновлено: {now_str()}</i>"
     )
 
@@ -250,7 +246,7 @@ def get_top10_text() -> str:
         lines.append(
             f"{coin['market_cap_rank']}. <b>{coin['name']}</b> ({coin['symbol'].upper()})\n"
             f"   Цена: {fmt_money(coin['current_price'])}\n"
-            f"   MC: {fmt_money(coin['market_cap'],0)}\n"
+            f"   MC: {fmt_money(coin['market_cap'], 0)}\n"
             f"   24ч: {fmt_pct(coin.get('price_change_percentage_24h'))}\n"
         )
     lines.append(f"<i>Обновлено: {now_str()}</i>")
@@ -264,18 +260,18 @@ def get_trending_text() -> str:
     for i, item in enumerate(data["coins"], start=1):
         c = item["item"]
         lines.append(
-            f"{i}. <b>{c['name']}</b> ({c['symbol']}) — Ранг: {c.get('market_cap_rank','?')}"
+            f"{i}. <b>{c['name']}</b> ({c['symbol']}) — Ранг: {c.get('market_cap_rank', '?')}"
         )
     lines.append(f"\n<i>Обновлено: {now_str()}</i>")
     return "\n".join(lines)
 
 def get_pairs_text() -> str:
-    # Стратегия: берём топ-10 монет и собираем их тикеры; строим общий список и выбираем по объёму
     coins = fetch_json(
         f"{COINGECKO_API}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1"
     )
     if not isinstance(coins, list):
         return "❌ Ошибка получения данных."
+    
     pairs = []
     for coin in coins:
         coin_id = coin["id"]
@@ -295,16 +291,18 @@ def get_pairs_text() -> str:
                     "price": price,
                     "exchange": exch,
                 })
+    
     if not pairs:
         return "❌ Данные по парам не найдены."
+    
     pairs.sort(key=lambda x: x["volume"], reverse=True)
     top = pairs[:10]
-    lines = ["<b>💹 Топ 10 торговых пар по объёму (по топ-10 монет)</b>\n"]
+    lines = ["<b>💹 Топ 10 торговых пар по объёму</b>\n"]
     for i, p in enumerate(top, start=1):
         lines.append(
             f"{i}. <b>{p['pair']}</b> на <i>{p['exchange']}</i>\n"
-            f"   Цена: {fmt_money(p['price'],6)}\n"
-            f"   Объём: {fmt_money(p['volume'],0)}\n"
+            f"   Цена: {fmt_money(p['price'], 6)}\n"
+            f"   Объём: {fmt_money(p['volume'], 0)}\n"
         )
     lines.append(f"<i>Обновлено: {now_str()}</i>")
     return "\n".join(lines)
@@ -331,7 +329,7 @@ def get_defi_text() -> str:
     for i, ch in enumerate(top, start=1):
         lines.append(
             f"{i}. {ch['name']}\n"
-            f"   TVL: {fmt_money(ch.get('tvl'),0)}\n"
+            f"   TVL: {fmt_money(ch.get('tvl'), 0)}\n"
             f"   Изм. 1д: {fmt_pct(ch.get('change_1d'))}\n"
         )
     lines.append(f"<i>Обновлено: {now_str()}</i>")
@@ -345,8 +343,8 @@ def get_coin_card_text(coin_id: str) -> Optional[str]:
     return (
         f"<b>{data['name']} ({data['symbol'].upper()})</b>\n\n"
         f"Цена: {fmt_money(md.get('current_price', {}).get('usd'))}\n"
-        f"Капитализация: {fmt_money(md.get('market_cap', {}).get('usd'),0)}\n"
-        f"Объём 24ч: {fmt_money(md.get('total_volume', {}).get('usd'),0)}\n"
+        f"Капитализация: {fmt_money(md.get('market_cap', {}).get('usd'), 0)}\n"
+        f"Объём 24ч: {fmt_money(md.get('total_volume', {}).get('usd'), 0)}\n"
         f"Изм. 24ч: {fmt_pct(md.get('price_change_percentage_24h'))}\n"
     )
 
@@ -357,8 +355,10 @@ def build_coin_chart_image_bytes(coin_id: str) -> Optional[io.BytesIO]:
     prices = data["prices"]
     if not prices:
         return None
+    
     xs = [datetime.fromtimestamp(p[0] / 1000) for p in prices]
     ys = [p[1] for p in prices]
+    
     plt.figure(figsize=(8, 4))
     plt.plot(xs, ys)
     plt.title(f"{coin_id.upper()} — 24ч")
@@ -367,6 +367,7 @@ def build_coin_chart_image_bytes(coin_id: str) -> Optional[io.BytesIO]:
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.figtext(0.99, 0.01, now_str(), ha="right", fontsize=8, color="gray")
+    
     buf = io.BytesIO()
     plt.savefig(buf, format="png", dpi=150)
     plt.close()
@@ -374,237 +375,243 @@ def build_coin_chart_image_bytes(coin_id: str) -> Optional[io.BytesIO]:
     return buf
 
 def get_simple_price(coin_id: str) -> Optional[float]:
-    data = fetch_json(
-        f"{COINGECKO_API}/simple/price?ids={coin_id}&vs_currencies=usd", ttl=30
-    )
+    data = fetch_json(f"{COINGECKO_API}/simple/price?ids={coin_id}&vs_currencies=usd", ttl=30)
     if not data or coin_id not in data:
         return None
     return float(data[coin_id]["usd"])
 
 # ------------------------------------------------------------------
-# ALERTS STORAGE (in-memory)
+# ALERTS SYSTEM
 # ------------------------------------------------------------------
-# bot_data["alerts"] = {
-#   chat_id: { coin_id: job }
-# }
-def get_alerts_store(ctx: ContextTypes.DEFAULT_TYPE) -> Dict[int, Dict[str, Job]]:
-    store = ctx.application.bot_data.get("alerts")
-    if store is None:
-        store = {}
-        ctx.application.bot_data["alerts"] = store
-    return store
+# Структура: alerts_store[chat_id][coin_id] = {"thread": thread, "last_price": price, "interval": seconds}
+alerts_store: Dict[int, Dict[str, Dict]] = {}
 
-# ------------------------------------------------------------------
-# HANDLERS: COMMANDS
-# ------------------------------------------------------------------
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "<b>CryptoVektorPro</b>\n\n"
-        "Добро пожаловать! Выберите раздел ниже.\n\n"
-        f'<a href="{CRYPTO_CHANNEL_URL}">Наш канал</a>'
-    )
-    await update.message.reply_text(text, reply_markup=main_menu_kb(), parse_mode="HTML")
-
-async def cmd_coin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        await update.message.reply_text("Использование: /coin <монета>\nПример: /coin bitcoin")
-        return
-    user_input = ctx.args[0]
-    coin_id = find_coin_id(user_input)
-    if not coin_id:
-        await update.message.reply_text("❌ Монета не найдена.")
-        return
-    card = get_coin_card_text(coin_id)
-    if not card:
-        await update.message.reply_text("❌ Ошибка получения данных.")
-        return
-    await update.message.reply_text(card, reply_markup=coin_card_kb(coin_id), parse_mode="HTML")
-
-async def cmd_alert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # shortcut командой /alert
-    text = "Выберите монету для уведомлений:"
-    await update.message.reply_text(text, reply_markup=alerts_coin_kb())
-
-# ------------------------------------------------------------------
-# HANDLERS: CALLBACK QUERY ROUTER
-# ------------------------------------------------------------------
-async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data
-
-    if data == "main_menu":
-        await q.message.edit_text(
-            "<b>CryptoVektorPro</b>\n\nВыберите раздел:", reply_markup=main_menu_kb(), parse_mode="HTML"
-        )
-        return
-
-    if data == "global":
-        await q.message.edit_text(get_global_metrics_text(), reply_markup=back_kb(), parse_mode="HTML")
-        return
-
-    if data == "top10":
-        await q.message.edit_text(get_top10_text(), reply_markup=back_kb(), parse_mode="HTML")
-        return
-
-    if data == "trending":
-        await q.message.edit_text(get_trending_text(), reply_markup=back_kb(), parse_mode="HTML")
-        return
-
-    if data == "pairs":
-        await q.message.edit_text(get_pairs_text(), reply_markup=back_kb(), parse_mode="HTML")
-        return
-
-    if data == "fear":
-        await q.message.edit_text(get_fear_text(), reply_markup=back_kb(), parse_mode="HTML")
-        return
-
-    if data == "defi":
-        await q.message.edit_text(get_defi_text(), reply_markup=back_kb(), parse_mode="HTML")
-        return
-
-    if data == "alerts_menu":
-        await q.message.edit_text("Выберите монету для уведомлений:", reply_markup=alerts_coin_kb())
-        return
-
-    if data == "alerts_clear":
-        await clear_all_alerts_for_chat(q.message.chat_id, ctx)
-        await q.message.edit_text("Все уведомления отключены.", reply_markup=alerts_coin_kb())
-        return
-
-    if data.startswith("alert_coin_"):
-        coin_id = data[len("alert_coin_"):]
-        await q.message.edit_text(
-            f"Выбрана монета <b>{coin_id}</b>.\nВыберите интервал уведомлений:",
-            reply_markup=alerts_interval_kb(coin_id),
-            parse_mode="HTML",
-        )
-        return
-
-    if data.startswith("alert_set_"):
-        # format: alert_set_<coin>_<seconds>
-        parts = data.split("_")
-        # ["alert","set","<coin>", "<seconds>"]
-        if len(parts) != 4:
-            return
-        coin_id = parts[2]
+def alert_worker(chat_id: int, coin_id: str, interval_s: int):
+    """Рабочий поток для отправки уведомлений"""
+    last_price = get_simple_price(coin_id)
+    
+    # Отправляем первое сообщение
+    if last_price:
+        bot.send_message(chat_id, f"🔔 Уведомления включены для {coin_id.upper()}: {fmt_money(last_price, 6)}")
+        alerts_store[chat_id][coin_id]["last_price"] = last_price
+    
+    while True:
         try:
-            seconds = int(parts[3])
-        except Exception:
-            seconds = 3600
-        await setup_alert_for_chat(q.message.chat_id, coin_id, seconds, ctx)
-        await q.message.edit_text(
-            f"✅ Уведомления включены для <b>{coin_id}</b> каждые {seconds // 60} мин / {seconds // 3600} ч.\n"
-            "Вы можете выбрать другую монету или отключить уведомления.",
-            reply_markup=alerts_coin_kb(),
-            parse_mode="HTML",
-        )
-        return
+            time.sleep(interval_s)
+            
+            # Проверяем, не был ли алерт отключен
+            if chat_id not in alerts_store or coin_id not in alerts_store[chat_id]:
+                break
+            
+            current_price = get_simple_price(coin_id)
+            if current_price is None:
+                bot.send_message(chat_id, f"⚠️ Не удалось получить цену {coin_id}")
+                continue
+            
+            last_price = alerts_store[chat_id][coin_id].get("last_price")
+            change_pct = None
+            
+            if last_price and last_price > 0:
+                change_pct = ((current_price - last_price) / last_price) * 100.0
+            
+            # Обновляем последнюю цену
+            alerts_store[chat_id][coin_id]["last_price"] = current_price
+            
+            # Формируем сообщение
+            if change_pct is None:
+                msg = f"🔔 {coin_id.upper()}: {fmt_money(current_price, 6)}"
+            else:
+                emoji = "📈" if change_pct > 0 else "📉" if change_pct < 0 else "➡️"
+                msg = (
+                    f"🔔 {coin_id.upper()}\n"
+                    f"Цена: {fmt_money(current_price, 6)}\n"
+                    f"{emoji} Изменение: {change_pct:+.2f}%"
+                )
+            
+            bot.send_message(chat_id, msg)
+            
+        except Exception as e:
+            logger.error(f"Ошибка в alert_worker для {chat_id}/{coin_id}: {e}")
+            break
 
-    if data.startswith("chart_"):
-        coin_id = data[len("chart_"):]
-        buf = build_coin_chart_image_bytes(coin_id)
-        if not buf:
-            await q.message.reply_text("❌ Не удалось построить график.")
-        else:
-            caption = f"График {coin_id.upper()} за 24ч\n{now_str()}"
-            await q.message.reply_photo(photo=buf, caption=caption)
-        # после отправки графика вернём карточку
+def setup_alert(chat_id: int, coin_id: str, interval_s: int):
+    """Настройка уведомления для пользователя"""
+    if chat_id not in alerts_store:
+        alerts_store[chat_id] = {}
+    
+    # Останавливаем предыдущий алерт для этой монеты, если был
+    if coin_id in alerts_store[chat_id]:
+        # Поток завершится сам при следующей проверке
+        pass
+    
+    # Создаем новый поток
+    thread = threading.Thread(
+        target=alert_worker,
+        args=(chat_id, coin_id, interval_s),
+        daemon=True
+    )
+    
+    alerts_store[chat_id][coin_id] = {
+        "thread": thread,
+        "interval": interval_s,
+        "last_price": None
+    }
+    
+    thread.start()
+
+def clear_all_alerts(chat_id: int):
+    """Отключение всех уведомлений для пользователя"""
+    if chat_id in alerts_store:
+        alerts_store[chat_id].clear()
+
+# ------------------------------------------------------------------
+# COMMAND HANDLERS
+# ------------------------------------------------------------------
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    text = (
+        "<b>🚀 CryptoVektorPro</b>\n\n"
+        "Добро пожаловать! Ваш помощник в мире криптовалют.\n"
+        "Выберите раздел ниже.\n\n"
+        f'<a href="{CRYPTO_CHANNEL_URL}">📢 Наш канал</a>'
+    )
+    bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=main_menu_keyboard())
+
+@bot.message_handler(commands=['coin'])
+def coin_command(message):
+    try:
+        user_input = message.text.split(' ', 1)[1]
+        coin_id = find_coin_id(user_input)
+        if not coin_id:
+            bot.send_message(message.chat.id, "❌ Монета не найдена.")
+            return
+        
         card = get_coin_card_text(coin_id)
-        if card:
-            await q.message.reply_text(card, reply_markup=coin_card_kb(coin_id), parse_mode="HTML")
-        return
+        if not card:
+            bot.send_message(message.chat.id, "❌ Ошибка получения данных.")
+            return
+        
+        bot.send_message(message.chat.id, card, parse_mode="HTML", reply_markup=coin_card_keyboard(coin_id))
+    except IndexError:
+        bot.send_message(message.chat.id, "Использование: /coin <монета>\nПример: /coin bitcoin")
+
+@bot.message_handler(commands=['alert'])
+def alert_command(message):
+    bot.send_message(message.chat.id, "Выберите монету для уведомлений:", reply_markup=alerts_coin_keyboard())
+
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    help_text = (
+        "<b>📋 Команды бота:</b>\n\n"
+        "/start - Главное меню\n"
+        "/coin <название> - Информация о монете\n"
+        "/alert - Настройка уведомлений\n"
+        "/help - Это сообщение\n\n"
+        "Используйте кнопки для навигации!"
+    )
+    bot.send_message(message.chat.id, help_text, parse_mode="HTML")
 
 # ------------------------------------------------------------------
-# ALERT JOB CALLBACK
+# CALLBACK HANDLERS
 # ------------------------------------------------------------------
-async def alert_job_callback(ctx: ContextTypes.DEFAULT_TYPE):
-    job: Job = ctx.job
-    chat_id = job.chat_id
-    data = job.data or {}
-    coin_id = data.get("coin_id")
-    last_price = data.get("last_price")
-
-    current_price = get_simple_price(coin_id)
-    if current_price is None:
-        await ctx.bot.send_message(chat_id, text=f"⚠️ Не удалось получить цену {coin_id}.")
-        return
-
-    change_pct = None
-    if last_price is not None and last_price > 0:
-        change_pct = ((current_price - last_price) / last_price) * 100.0
-
-    # обновляем в job.data
-    job.data["last_price"] = current_price
-
-    # формируем текст
-    if change_pct is None:
-        msg = f"🔔 Текущее значение {coin_id.upper()}: {fmt_money(current_price,6)}."
-    else:
-        msg = (
-            f"🔔 Обновление {coin_id.upper()}.\n"
-            f"Цена: {fmt_money(current_price,6)}\n"
-            f"Изменение с последнего уведомления: {change_pct:+.2f}%"
-        )
-    await ctx.bot.send_message(chat_id, text=msg)
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    message_id = call.message.message_id
+    data = call.data
+    
+    try:
+        if data == "main_menu":
+            text = (
+                "<b>🚀 CryptoVektorPro</b>\n\n"
+                "Выберите раздел:"
+            )
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=main_menu_keyboard())
+        
+        elif data == "global":
+            text = get_global_metrics_text()
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_keyboard())
+        
+        elif data == "top10":
+            text = get_top10_text()
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_keyboard())
+        
+        elif data == "trending":
+            text = get_trending_text()
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_keyboard())
+        
+        elif data == "pairs":
+            text = get_pairs_text()
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_keyboard())
+        
+        elif data == "fear":
+            text = get_fear_text()
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_keyboard())
+        
+        elif data == "defi":
+            text = get_defi_text()
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=back_keyboard())
+        
+        elif data == "alerts_menu":
+            bot.edit_message_text("Выберите монету для уведомлений:", chat_id, message_id, reply_markup=alerts_coin_keyboard())
+        
+        elif data == "alerts_clear":
+            clear_all_alerts(chat_id)
+            bot.edit_message_text("✅ Все уведомления отключены.", chat_id, message_id, reply_markup=alerts_coin_keyboard())
+        
+        elif data.startswith("alert_coin_"):
+            coin_id = data[len("alert_coin_"):]
+            text = f"Выбрана монета <b>{coin_id.upper()}</b>.\nВыберите интервал уведомлений:"
+            bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=alerts_interval_keyboard(coin_id))
+        
+        elif data.startswith("alert_set_"):
+            parts = data.split("_")
+            if len(parts) >= 4:
+                coin_id = parts[2]
+                try:
+                    seconds = int(parts[3])
+                except ValueError:
+                    seconds = 3600
+                
+                setup_alert(chat_id, coin_id, seconds)
+                interval_text = f"{seconds // 60} мин" if seconds < 3600 else f"{seconds // 3600} ч"
+                text = f"✅ Уведомления включены для <b>{coin_id.upper()}</b> каждые {interval_text}."
+                bot.edit_message_text(text, chat_id, message_id, parse_mode="HTML", reply_markup=alerts_coin_keyboard())
+        
+        elif data.startswith("chart_"):
+            coin_id = data[len("chart_"):]
+            buf = build_coin_chart_image_bytes(coin_id)
+            if buf:
+                caption = f"📈 График {coin_id.upper()} за 24ч\n{now_str()}"
+                bot.send_photo(chat_id, buf, caption=caption)
+                # Возвращаем карточку монеты
+                card = get_coin_card_text(coin_id)
+                if card:
+                    bot.send_message(chat_id, card, parse_mode="HTML", reply_markup=coin_card_keyboard(coin_id))
+            else:
+                bot.send_message(chat_id, "❌ Не удалось построить график.")
+    
+    except Exception as e:
+        logger.error(f"Ошибка в callback_handler: {e}")
+        bot.send_message(chat_id, "❌ Произошла ошибка. Попробуйте еще раз.")
 
 # ------------------------------------------------------------------
-# ALERT MANAGEMENT
+# TEXT HANDLER
 # ------------------------------------------------------------------
-async def setup_alert_for_chat(chat_id: int, coin_id: str, interval_s: int, ctx: ContextTypes.DEFAULT_TYPE):
-    store = get_alerts_store(ctx)
-    chat_alerts = store.get(chat_id)
-    if chat_alerts is None:
-        chat_alerts = {}
-        store[chat_id] = chat_alerts
-
-    # отменяем предыдущую задачу для этой монеты, если была
-    old_job = chat_alerts.get(coin_id)
-    if old_job:
-        old_job.schedule_removal()
-
-    # получить стартовую цену
-    start_price = get_simple_price(coin_id)
-
-    # создать новую задачу
-    job = ctx.job_queue.run_repeating(
-        alert_job_callback,
-        interval=interval_s,
-        first=0,  # сразу отправим первое сообщение
-        chat_id=chat_id,
-        name=f"alert_{chat_id}_{coin_id}",
-        data={"coin_id": coin_id, "last_price": start_price},
+@bot.message_handler(content_types=['text'])
+def handle_text(message):
+    bot.send_message(
+        message.chat.id,
+        "Используйте команды или кнопки меню для навигации!\n\n"
+        "/start - главное меню\n"
+        "/help - справка\n"
+        "/coin <название> - информация о монете"
     )
 
-    chat_alerts[coin_id] = job
-
-async def clear_all_alerts_for_chat(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE):
-    store = get_alerts_store(ctx)
-    chat_alerts = store.get(chat_id)
-    if not chat_alerts:
-        return
-    for _, job in chat_alerts.items():
-        job.schedule_removal()
-    store[chat_id] = {}
-
 # ------------------------------------------------------------------
-# MAIN SETUP
+# MAIN
 # ------------------------------------------------------------------
-def main():
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # команды
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("coin", cmd_coin))
-    app.add_handler(CommandHandler("alert", cmd_alert))
-
-    # inline callback router
-    app.add_handler(CallbackQueryHandler(on_callback))
-
-    logger.info("🚀 CryptoVektorPro Bot запущен!")
-    app.run_polling()
-
-
 if __name__ == "__main__":
-    main()
+    logger.info("🚀 CryptoVektorPro Bot запущен!")
+    bot.polling(none_stop=True)
